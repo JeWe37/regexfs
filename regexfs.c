@@ -57,7 +57,6 @@ char* replacement_str;
 
 typedef struct {
     pcre2_code *regex;
-    pcre2_match_data *match_data;
     PCRE2_SPTR* replacements;
     int n_replacements;
 } regex_replaces;
@@ -132,14 +131,7 @@ int regexfs_parse_replacements() {
             return -1;
         }
 
-        pcre2_match_data *match_data = pcre2_match_data_create_from_pattern(compiled_regex, NULL);
-        if (match_data == NULL) {
-            fprintf(stderr, "pcre2_match_data_create_from_pattern failed!\n");
-            return -1;
-        }
-
         results[i].regex = compiled_regex;
-        results[i].match_data = match_data;
     }
     return 0;
 }
@@ -152,6 +144,8 @@ typedef struct {
 } path_cache_entry;
 
 path_cache_entry* path_cache = NULL;
+
+pthread_rwlock_t path_cache_lock = PTHREAD_RWLOCK_INITIALIZER;
 
 static int regexfs_transform_path(const char* path, char* output_path) {
     // idea for caching: path -> output_path is an injective function, so we can use a hash table to cache the results
@@ -170,20 +164,29 @@ static int regexfs_transform_path(const char* path, char* output_path) {
 
     // check if path in hashtable
     path_cache_entry* entry;
+    // lock
+    pthread_rwlock_rdlock(&path_cache_lock);
     HASH_FIND_STR(path_cache, path, entry);
     if (entry != NULL) {
         // check if file exists
         if (!stat(entry->output_path, &statbuf) && S_ISREG(statbuf.st_mode)) {
             strncpy(output_path, entry->output_path, PATH_MAX);
+            pthread_rwlock_unlock(&path_cache_lock);
             return 0;
         } else {
-            // remove entry from hashtable
-            HASH_DEL(path_cache, entry);
-            free(entry->path);
-            free(entry->output_path);
-            free(entry);
+            pthread_rwlock_unlock(&path_cache_lock);
+            pthread_rwlock_wrlock(&path_cache_lock);
+            HASH_FIND_STR(path_cache, path, entry);
+            if (entry != NULL) {
+                // remove entry from hashtable
+                HASH_DEL(path_cache, entry);
+                free(entry->path);
+                free(entry->output_path);
+                free(entry);
+            }
         }
     }
+    pthread_rwlock_unlock(&path_cache_lock);
 
     char* basec = strdupa(path);
     char* base = basename(basec);
@@ -206,10 +209,16 @@ static int regexfs_transform_path(const char* path, char* output_path) {
         int found = 0;
         for (int i = 0; i < n_results; ++i) {
             pcre2_code* regex = results[i].regex;
-            pcre2_match_data* match_data = results[i].match_data;
+            pcre2_match_data *match_data = pcre2_match_data_create_from_pattern(regex, NULL);
+            if (match_data == NULL) {
+                fprintf(stderr, "pcre2_match_data_create_from_pattern failed!\n");
+                exit(2);
+            }
             num_matches = pcre2_match(regex, (PCRE2_SPTR)de->d_name, PCRE2_ZERO_TERMINATED, 0, 0, match_data, NULL);
-            if (num_matches < 0)
+            if (num_matches < 0) {
+                pcre2_match_data_free(match_data);
                 continue;
+            }
 
             for (int j = 0; j < results[i].n_replacements; ++j) {
                 new_name_len = NAME_MAX + 1;
@@ -226,16 +235,17 @@ static int regexfs_transform_path(const char* path, char* output_path) {
                     new_name, // output
                     &new_name_len  // Result length
                 );
-                if (num_matches < 1) {
+                if (num_matches < 1)
                     exit(1);
-                }
                 new_name[new_name_len] = '\0';
 
-                if (strcmp((char*)new_name, base) == 0)
+                if (strcmp((char*)new_name, base) == 0) {
+                    pcre2_match_data_free(match_data);
                     goto success;
-                else
-                    found = 1;
+                }
+                found = 1;
             }
+            pcre2_match_data_free(match_data);
         }
         if (!found && strcmp(de->d_name, base) == 0)
             goto success;
@@ -250,7 +260,9 @@ success:
     entry = malloc(sizeof(path_cache_entry));
     entry->path = strdup(path);
     entry->output_path = strdup(output_path);
+    pthread_rwlock_wrlock(&path_cache_lock);
     HASH_ADD_KEYPTR(hh, path_cache, entry->path, strlen(entry->path), entry);
+    pthread_rwlock_unlock(&path_cache_lock);
 
     closedir(dp);
     return 0;
@@ -295,12 +307,23 @@ static int regexfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler, 
                 goto error;
             continue;
         }
+        if (de->d_type == DT_DIR) {
+            if (filler(buf, de->d_name, &st, 0))
+                goto error;
+            continue;
+        }
         for (int i = 0; i < n_results; ++i) {
             pcre2_code* regex = results[i].regex;
-            pcre2_match_data* match_data = results[i].match_data;
+            pcre2_match_data *match_data = pcre2_match_data_create_from_pattern(regex, NULL);
+            if (match_data == NULL) {
+                fprintf(stderr, "pcre2_match_data_create_from_pattern failed!\n");
+                exit(2);
+            }
             num_matches = pcre2_match(regex, (PCRE2_SPTR)de->d_name, PCRE2_ZERO_TERMINATED, 0, 0, match_data, NULL);
-            if (num_matches < 0)
+            if (num_matches < 0) {
+                pcre2_match_data_free(match_data);
                 continue;
+            }
 
             for (int j = 0; j < results[i].n_replacements; ++j) {
                 new_name_len = NAME_MAX + 1;
@@ -317,16 +340,17 @@ static int regexfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler, 
                     new_name, // output
                     &new_name_len  // Result length
                 );
-                if (num_matches < 1) {
-                    return -1;
-                }
+                if (num_matches < 1)
+                    exit(1);
                 new_name[new_name_len] = '\0';
 
-                if (filler(buf, (const char*)new_name, &st, 0))
+                if (filler(buf, (const char*)new_name, &st, 0)) {
+                    pcre2_match_data_free(match_data);
                     goto error;
-                else
-                    added = 1;
+                }
+                added = 1;
             }
+            pcre2_match_data_free(match_data);
         }
         if (!added && filler(buf, de->d_name, &st, 0))
             break;
