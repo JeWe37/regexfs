@@ -92,24 +92,28 @@ int regexfs_parse_replacements() {
         replacement_str = strchr(replacement_str, ':');
         replacement_str[0] = '\0';
         replacement_str++;
-
-        // parse the replacements
-        results[i].n_replacements = 1;
-        int j;
-        for (j = 0; replacement_str[j] != '\0'; j++) {
-            if (replacement_str[j] == ';') {
-                replacement_str[j] = '\0';
-                results[i].n_replacements++;
-            }
-        }
         printf("regex %s\n", regex);
 
-        results[i].replacements = malloc(sizeof(PCRE2_SPTR) * results[i].n_replacements);
-        // fill replacements with pointers to the start of each replacement
-        for (int k = 0; k < results[i].n_replacements; k++) {
-            results[i].replacements[k] = (PCRE2_SPTR)replacement_str;
-            printf("replacement %s\n", replacement_str);
-            replacement_str += strlen(replacement_str) + 1;
+        // parse the replacements
+        if (replacement_str[0] == '\0') {
+            results[i].n_replacements = 0;
+            replacement_str++;
+        } else {
+            results[i].n_replacements = 1;
+            for (int j = 0; replacement_str[j] != '\0'; j++) {
+                if (replacement_str[j] == ';') {
+                    replacement_str[j] = '\0';
+                    results[i].n_replacements++;
+                }
+            }
+
+            results[i].replacements = malloc(sizeof(PCRE2_SPTR) * results[i].n_replacements);
+            // fill replacements with pointers to the start of each replacement
+            for (int k = 0; k < results[i].n_replacements; k++) {
+                results[i].replacements[k] = (PCRE2_SPTR)replacement_str;
+                printf("replacement %s\n", replacement_str);
+                replacement_str += strlen(replacement_str) + 1;
+            }
         }
 
         // compile the regex
@@ -355,6 +359,9 @@ static int regexfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler, 
                 added = 1;
             }
             pcre2_match_data_free(match_data);
+
+            if (!results[i].n_replacements)
+                added = 1;
         }
         if (!added && filler(buf, de->d_name, &st, 0))
             break;

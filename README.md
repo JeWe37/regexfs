@@ -60,6 +60,9 @@ permission checking, since regexfs does no access control on its own.
 Please note that you may need to replace whitespace characters in the regex
 and escape others to allow proper parsing of the file.
 
+If a regex with an empty replacement is matched, the file will not be shown in
+the mountpoint. This is useful for hiding files.
+
 WARNING: _NEVER_ USE allow_other WITHOUT default_permissions, OR YOU RISK
 ALLOWING UNPRIVILEDGED PROCESSES TO ACCESS FILES THEY SHOULD NOT BE ABLE TO.
 
