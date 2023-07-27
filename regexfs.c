@@ -130,6 +130,10 @@ int regexfs_parse_replacements() {
             fprintf(stderr, "PCRE2 compilation failed at offset %d: %s\n", (int)erroroffset, buffer);
             return -1;
         }
+        if (pcre2_jit_compile(compiled_regex, PCRE2_JIT_COMPLETE) < 0) {
+            fprintf(stderr, "PCRE2 JIT compilation failed\n");
+            return -1;
+        }
 
         results[i].regex = compiled_regex;
     }
